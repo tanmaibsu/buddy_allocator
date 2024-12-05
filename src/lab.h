@@ -1,171 +1,176 @@
-#include <assert.h>
+#ifndef LAB_H
+#define LAB_H
+
 #include <stdlib.h>
-#include <time.h>
-#ifdef __APPLE__
-#include <sys/errno.h>
-#else
-#include <errno.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C"
+{
 #endif
-#include "harness/unity.h"
-#include "../src/lab.h"
+  /**
+   * The default amount of memory that this memory manger will manage unless
+   * explicitly set with buddy_init. The number of bytes is calculated as 2^DEFAULT_K
+   */
+#define DEFAULT_K 30
 
-void setUp(void)
-{
-  // set stuff up here
-}
+  /**
+   * The minimum size of the buddy memory pool.
+   */
+#define MIN_K 20
 
-void tearDown(void)
-{
-  // clean stuff up here
-}
+  /**
+   * The maximum size of the buddy memory pool. This is 1 larger than needed
+   * to allow indexes 1-N instead of 0-N. Internally the maximum amount of
+   * memory is MAX_K-1
+   */
+#define MAX_K 48
 
-/**
- * Check the pool to ensure it is full.
- */
-void check_buddy_pool_full(struct buddy_pool *pool)
-{
-  // A full pool should have all values 0-(kval-1) as empty
-  for (size_t i = 0; i < pool->kval_m; i++)
+  /**
+   * The smallest memory block size that can be returned by buddy_malloc value must
+   * be large enough to account for the avail header.
+   */
+#define SMALLEST_K 6
+
+#define BLOCK_AVAIL 1    /*Block is available to allocate*/
+#define BLOCK_RESERVED 0 /*Block has been handed to user*/
+#define BLOCK_UNUSED 3   /*Block is not used at all*/
+
+  /**
+   * Struct to represent the table of all available blocks do not reorder members
+   * of this struct because internal calculations depend on the ordering.
+   */
+  struct avail
   {
-    assert(pool->avail[i].next == &pool->avail[i]);
-    assert(pool->avail[i].prev == &pool->avail[i]);
-    assert(pool->avail[i].tag == BLOCK_UNUSED);
-    assert(pool->avail[i].kval == i);
-  }
+    unsigned short int tag;  /*Tag for block status BLOCK_AVAIL, BLOCK_RESERVED*/
+    unsigned short int kval; /*The kval of this block*/
+    struct avail *next;      /*next memory block*/
+    struct avail *prev;      /*prev memory block*/
+  };
 
-  // The avail array at kval should have the base block
-  assert(pool->avail[pool->kval_m].next->tag == BLOCK_AVAIL);
-  assert(pool->avail[pool->kval_m].next->next == &pool->avail[pool->kval_m]);
-  assert(pool->avail[pool->kval_m].prev->prev == &pool->avail[pool->kval_m]);
-
-  // Check to make sure the base address points to the starting pool
-  // If this fails either buddy_init is wrong or we have corrupted the
-  // buddy_pool struct.
-  assert(pool->avail[pool->kval_m].next == pool->base);
-}
-
-/**
- * Check the pool to ensure it is empty.
- */
-void check_buddy_pool_empty(struct buddy_pool *pool)
-{
-  // An empty pool should have all values 0-(kval) as empty
-  for (size_t i = 0; i <= pool->kval_m; i++)
+  /**
+   * The buddy memory pool.
+   */
+  struct buddy_pool
   {
-    assert(pool->avail[i].next == &pool->avail[i]);
-    assert(pool->avail[i].prev == &pool->avail[i]);
-    assert(pool->avail[i].tag == BLOCK_UNUSED);
-    assert(pool->avail[i].kval == i);
-  }
-}
+    size_t kval_m;             /*The max kval of this pool*/
+    size_t numbytes;           /*The number of bytes this pool is managing*/
+    void *base;                /*Base address used to scale memory for buddy calculations*/
+    struct avail avail[MAX_K]; /*The array of available memory blocks*/
+  };
 
-/**
- * Test allocating 1 byte to make sure we split the blocks all the way down
- * to MIN_K size. Then free the block and ensure we end up with a full
- * memory pool again
- */
-void test_buddy_malloc_one_byte(void)
-{
-  fprintf(stderr, "->Test allocating and freeing 1 byte\n");
-  struct buddy_pool pool;
-  int kval = MIN_K;
-  size_t size = UINT64_C(1) << kval;
-  buddy_init(&pool, size);
-  void *mem = buddy_malloc(&pool, 1);
-  // Make sure correct kval was allocated
-  buddy_free(&pool, mem);
-  check_buddy_pool_full(&pool);
-  buddy_destroy(&pool);
-}
+  /**
+   * Converts bytes to its equivalent K value defined as bytes <= 2^K
+   * @param bytes The bytes needed
+   * @return K The number of bytes expressed as 2^K
+   */
+  size_t btok(size_t bytes);
 
-/**
- * Tests the allocation of one massive block that should consume the entire memory
- * pool and makes sure that after the pool is empty we correctly fail subsequent calls.
- */
-void test_buddy_malloc_one_large(void)
-{
-  fprintf(stderr, "->Testing size that will consume entire memory pool\n");
-  struct buddy_pool pool;
-  size_t bytes = UINT64_C(1) << MIN_K;
-  buddy_init(&pool, bytes);
+  /**
+   * Find the buddy of a given pointer and kval relative to the base address we got from mmap
+   * @param pool The memory pool to work on (needed for the base addresses)
+   * @param buddy The memory block that we want to find the buddy for
+   * @return A pointer to the buddy
+   */
+  struct avail *buddy_calc(struct buddy_pool *pool, struct avail *buddy);
 
-  // Ask for an exact K value to be allocated. This test makes assumptions on
-  // the internal details of buddy_init.
-  size_t ask = bytes - sizeof(struct avail);
-  void *mem = buddy_malloc(&pool, ask);
-  assert(mem != NULL);
+  /**
+   * Allocates a block of size bytes of memory, returning a pointer to
+   * the beginning of the block. The content of the newly allocated block
+   * of memory is not initialized, remaining with indeterminate values.
+   *
+   * If size is zero, the return value will be NULL
+   * If pool is NULL, the return value will be NULL
+   *
+   * @param pool The memory pool to alloc from
+   * @param size The size of the user requested memory block in bytes
+   * @return A pointer to the memory block
+   */
+  void *buddy_malloc(struct buddy_pool *pool, size_t size);
 
-  // Move the pointer back and make sure we got what we expected
-  struct avail *tmp = (struct avail *)mem - 1;
-  assert(tmp->kval == MIN_K);
-  assert(tmp->tag == BLOCK_RESERVED);
-  check_buddy_pool_empty(&pool);
+  /**
+   * A block of memory previously allocated by a call to malloc,
+   * calloc or realloc is deallocated, making it available again
+   * for further allocations.
+   *
+   * If ptr does not point to a block of memory allocated with
+   * the above functions, it causes undefined behavior.
+   *
+   * If ptr is a null pointer, the function does nothing.
+   * Notice that this function does not change the value of ptr itself,
+   * hence it still points to the same (now invalid) location.
+   *
+   * @param pool The memory pool
+   * @param ptr Pointer to the memory block to free
+   */
+  void buddy_free(struct buddy_pool *pool, void *ptr);
 
-  // Verify that a call on an empty tool fails as expected and errno is set to ENOMEM.
-  void *fail = buddy_malloc(&pool, 5);
-  assert(fail == NULL);
-  assert(errno = ENOMEM);
+  /**
+   * Changes the size of the memory block pointed to by ptr.
+   * The function may move the memory block to a new location
+   * (whose address is returned by the function).
+   * The content of the memory block is preserved up to the
+   * lesser of the new and old sizes, even if the block is
+   * moved to a new location. If the new size is larger,
+   * the value of the newly allocated portion is indeterminate.
+   *
+   * In case that ptr is a null pointer, the function behaves
+   * like malloc, assigning a new block of size bytes and
+   * returning a pointer to its beginning.
+   *
+   * if size is equal to zero, and ptr is not NULL, then the  call
+   * is equivalent to free(ptr)
+   *
+   * @param pool The memory pool
+   * @param ptr Pointer to a memory block
+   * @param size The new size of the memory block
+   * @return Pointer to the new memory block
+   */
+  void *buddy_realloc(struct buddy_pool *pool, void *ptr, size_t size);
 
-  // Free the memory and then check to make sure everything is OK
-  buddy_free(&pool, mem);
-  check_buddy_pool_full(&pool);
-  buddy_destroy(&pool);
-}
+  /**
+   * Initialize a new memory pool using the buddy algorithm. Internally,
+   * this function uses mmap to get a block of memory to manage so should be
+   * portable to any system that implements mmap. This function will round
+   * up to the nearest power of two. So if the user requests 503MiB
+   * it will be rounded up to 512MiB.
+   *
+   * Note that if a 0 is passed as an argument then it initializes
+   * the memory pool to be of the default size of DEFAULT_K. If the caller
+   * specifies an unreasonably small size, then the buddy system may
+   * not be able to satisfy any requests.
+   *
+   * NOTE: Memory pools returned by this function can not be intermingled.
+   * Calling buddy_malloc with pool A and then calling buddy_free with
+   * pool B will result in undefined behavior.
+   *
+   * @param size The size of the pool in bytes.
+   * @param pool A pointer to the pool to initialize
+   */
+  void buddy_init(struct buddy_pool *pool, size_t size);
 
-/**
- * Tests to make sure that the struct buddy_pool is correct and all fields
- * have been properly set kval_m, avail[kval_m], and base pointer after a
- * call to init
- */
-void test_buddy_init(void)
-{
-  fprintf(stderr, "->Testing buddy init\n");
-  // Loop through all kval MIN_k-DEFAULT_K and make sure we get the correct amount allocated.
-  // We will check all the pointer offsets to ensure the pool is all configured correctly
-  for (size_t i = MIN_K; i <= DEFAULT_K; i++)
-  {
-    size_t size = UINT64_C(1) << i;
-    struct buddy_pool pool;
-    buddy_init(&pool, size);
-    check_buddy_pool_full(&pool);
-    buddy_destroy(&pool);
-  }
-}
+  /**
+   * Inverse of buddy_init.
+   *
+   * Notice that this function does not change the value of pool itself,
+   * hence it still points to the same (now invalid) location.
+   *
+   * @param pool The memory pool to destroy
+   */
+  void buddy_destroy(struct buddy_pool *pool);
 
-/**
- * Tests reallocating a block to a smaller and larger size.
- */
-void test_buddy_realloc(void)
-{
-  fprintf(stderr, "->Testing buddy realloc\n");
-  struct buddy_pool pool;
-  size_t size = UINT64_C(1) << MIN_K;
-  buddy_init(&pool, size);
+  /**
+   * @brief Entry to a main function for testing purposes
+   *
+   * @param argc system argc
+   * @param argv system argv
+   * @return exit status
+   */
+  int myMain(int argc, char **argv);
 
-  void *mem = buddy_malloc(&pool, 1);
-  assert(mem != NULL);
+#ifdef __cplusplus
+} // extern "C"
+#endif
 
-  void *new_mem = buddy_realloc(&pool, mem, 2 * (UINT64_C(1) << SMALLEST_K));
-  assert(new_mem != NULL);
-  assert(new_mem != mem);
-
-  buddy_free(&pool, new_mem);
-  check_buddy_pool_full(&pool);
-  buddy_destroy(&pool);
-}
-
-int main(void)
-{
-  time_t t;
-  unsigned seed = (unsigned)time(&t);
-  fprintf(stderr, "Random seed:%d\n", seed);
-  srand(seed);
-  printf("Running memory tests.\n");
-
-  UNITY_BEGIN();
-  RUN_TEST(test_buddy_init);
-  RUN_TEST(test_buddy_malloc_one_byte);
-  RUN_TEST(test_buddy_malloc_one_large);
-  RUN_TEST(test_buddy_realloc);
-  return UNITY_END();
-}
+#endif
